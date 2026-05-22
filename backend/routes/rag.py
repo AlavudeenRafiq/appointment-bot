@@ -137,8 +137,18 @@ def extract_required_terms(draft_reply: str) -> list:
             terms.extend(re.findall(r"[a-z0-9]+", group.lower()))
 
     draft_lower = draft_reply.lower()
-    if "for fever" in draft_lower or "fever or cold symptoms" in draft_lower:
-        terms.extend(["fever", "rest", "fluids", "103"])
+    if "i found your record" in draft_lower:
+        terms.append("record")
+    if "fever" in draft_lower:
+        terms.append("fever")
+    if "rest" in draft_lower:
+        terms.append("rest")
+    if "fluids" in draft_lower:
+        terms.append("fluids")
+    if "103" in draft_lower:
+        terms.append("103")
+    if "same-day care" in draft_lower:
+        terms.extend(["same", "day", "care"])
     if "skin, mouth, rash" in draft_lower:
         terms.extend(["fever", "swelling", "breathing"])
     if "for stomach symptoms" in draft_lower:
@@ -205,6 +215,8 @@ def is_safe_llm_reply(reply: str, draft_reply: str) -> bool:
         return False
     if has_repeated_phrase(reply):
         return False
+    if "\n- " in draft_reply and "\n- " not in reply:
+        return False
 
     words = reply.split()
     if not 3 <= len(words) <= 90:
@@ -221,7 +233,7 @@ def naturalize_reply(draft_reply: str) -> tuple:
     required_terms = ", ".join(extract_required_terms(draft_reply)) or "same facts"
     prompt = (
         "Rewrite this medical appointment assistant response in a warm, natural tone. "
-        "Use one concise paragraph. "
+        "Use short patient-facing bullet points, not a paragraph. "
         "Keep the same facts. Do not add diagnosis, treatment, medical history, or extra booking details. "
         f"Your reply must include these exact details: {required_terms}. "
         "Return only the patient-facing reply.\n\n"
@@ -252,20 +264,32 @@ def build_medical_record_note(patient_info: dict) -> str:
             diagnoses.append(diagnosis)
 
     if not diagnoses:
-        return "I do not see prior medical conditions listed in your record."
+        return "No prior conditions are listed."
 
     diagnosis_text = ", ".join(diagnoses[:3])
-    return f"Your record lists {diagnosis_text}, so please be a little cautious."
+    return f"It lists {diagnosis_text}, so please be cautious."
+
+def extract_duration_days(current_concern: str) -> Optional[int]:
+    match = re.search(r"\b(\d+)\s+days?\b", current_concern.lower())
+    return int(match.group(1)) if match else None
 
 def build_protocol_guidance(current_concern: str, pinecone_context: str) -> str:
     concern_lower = current_concern.lower()
 
     if any(term in concern_lower for term in ("fever", "cold", "cough", "sore throat", "body pain")):
+        duration_days = extract_duration_days(current_concern)
+        if duration_days and duration_days >= 3:
+            return (
+                f"- Triage: Fever for {duration_days} days meets same-day care guidance from the PDF.\n"
+                "- First aid: Keep resting, drink fluids, and use OTC medicine only as directed.\n"
+                "- Next step: Arrange clinician care today. I can help book an appointment if you want."
+            )
+
         return (
-            "For fever, rest, drink fluids, and use OTC medicine only as directed. "
-            "Get same-day care if it reaches 103 F / 39.4 C, lasts several days, or comes with dehydration, rash/bruising, "
-            "urinary pain, or serious illness. Get emergency help for breathing trouble, chest pressure, confusion, seizure, "
-            "stiff neck, severe headache, purple rash, or not urinating."
+            "- First aid: For fever, rest, drink fluids, and use OTC medicine only as directed if no red flags apply.\n"
+            "- Same-day care: 103 F / 39.4 C, several days, dehydration, rash/bruising, urinary pain, or serious illness.\n"
+            "- Emergency: Breathing trouble, chest pressure, confusion, seizure, stiff neck, severe headache, purple rash, or not urinating.\n"
+            "- Next question: What is your temperature and how many days has it been?"
         )
 
     if any(term in concern_lower for term in ("oral lesion", "mouth lesion", "lesion", "rash", "hives", "swelling")):
@@ -307,12 +331,6 @@ def build_chat_reply(current_concern: str, patient_info: dict, doctor: Optional[
                      appointment_record: Optional[dict], booking_requested: bool,
                      requested_doctor_name: Optional[str], pinecone_context: str) -> str:
     concern = current_concern or "your concern"
-    display_concern = concern
-    concern_lower = concern.lower()
-    for known_concern in ("oral lesions", "mouth lesions", "fever", "cough", "headache", "diarrhea", "vomiting"):
-        if known_concern in concern_lower:
-            display_concern = known_concern
-            break
     patient_name = patient_info.get("name") if patient_info else None
 
     if appointment_record and doctor:
@@ -337,14 +355,11 @@ def build_chat_reply(current_concern: str, patient_info: dict, doctor: Optional[
 
     intro = "I've noted your concern"
     if patient_name and patient_name != "New Patient":
-        intro = f"I found your record, {patient_name}. Concern"
+        intro = f"I found your record, {patient_name}"
 
     record_note = build_medical_record_note(patient_info)
     protocol_guidance = build_protocol_guidance(concern, pinecone_context)
-    return (
-        f"{intro}: {display_concern}. {record_note} {protocol_guidance} "
-        "Try these steps if no red flags apply. If it continues or worsens, I can help book an appointment."
-    )
+    return f"{intro}.\n- Record: {record_note}\n{protocol_guidance}"
 
 @router.post("/rag")
 def rag_pipeline(query: str, patient_id: Optional[str] = None,

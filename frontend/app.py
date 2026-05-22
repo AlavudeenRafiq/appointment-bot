@@ -23,6 +23,7 @@ st.markdown("""
         margin: 8px;
         text-align: left;
         font-family: Arial, sans-serif;
+        white-space: pre-wrap;
     }
     </style>
 """, unsafe_allow_html=True)
