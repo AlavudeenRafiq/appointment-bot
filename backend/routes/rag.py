@@ -137,13 +137,13 @@ def extract_required_terms(draft_reply: str) -> list:
             terms.extend(re.findall(r"[a-z0-9]+", group.lower()))
 
     draft_lower = draft_reply.lower()
-    if "rag triage guidance for fever" in draft_lower:
+    if "for fever" in draft_lower or "fever or cold symptoms" in draft_lower:
         terms.extend(["fever", "rest", "fluids", "103"])
-    if "rag triage guidance for skin" in draft_lower:
+    if "skin, mouth, rash" in draft_lower:
         terms.extend(["fever", "swelling", "breathing"])
-    if "rag triage guidance for stomach" in draft_lower:
+    if "for stomach symptoms" in draft_lower:
         terms.extend(["fluids", "dehydration", "blood"])
-    if "rag triage guidance for headache" in draft_lower:
+    if "for headache or neurologic symptoms" in draft_lower:
         terms.extend(["headache", "confusion", "weakness"])
 
     return [term for term in terms if len(term) > 2 or term.isdigit()]
@@ -221,6 +221,7 @@ def naturalize_reply(draft_reply: str) -> tuple:
     required_terms = ", ".join(extract_required_terms(draft_reply)) or "same facts"
     prompt = (
         "Rewrite this medical appointment assistant response in a warm, natural tone. "
+        "Use one concise paragraph. "
         "Keep the same facts. Do not add diagnosis, treatment, medical history, or extra booking details. "
         f"Your reply must include these exact details: {required_terms}. "
         "Return only the patient-facing reply.\n\n"
@@ -254,58 +255,46 @@ def build_medical_record_note(patient_info: dict) -> str:
         return "I do not see prior medical conditions listed in your record."
 
     diagnosis_text = ", ".join(diagnoses[:3])
-    return (
-        f"I see this in your medical record: {diagnosis_text}. "
-        "That does not diagnose the current symptom, but it is relevant when deciding how cautious to be."
-    )
+    return f"Your record lists {diagnosis_text}, so please be a little cautious."
 
 def build_protocol_guidance(current_concern: str, pinecone_context: str) -> str:
     concern_lower = current_concern.lower()
 
     if any(term in concern_lower for term in ("fever", "cold", "cough", "sore throat", "body pain")):
         return (
-            "RAG triage guidance for fever or respiratory symptoms: if symptoms are mild and there are no red flags, "
-            "start with rest, fluids, and over-the-counter medicines only as directed on the label or by a clinician. "
-            "Stay home and away from others until symptoms are improving and fever has been gone for at least 24 hours "
-            "without fever-reducing medicine. Seek same-day care if fever is 103 F / 39.4 C or higher, lasts several days, "
-            "comes with dehydration, rash or bruising, pain with urination, or serious underlying illness. Seek emergency "
-            "help now for trouble breathing, chest or abdominal pressure, confusion, seizure, stiff neck, severe headache, "
-            "purple non-blanching rash, not urinating, or looking very ill."
+            "For fever, rest, drink fluids, and use OTC medicine only as directed. "
+            "Get same-day care if it reaches 103 F / 39.4 C, lasts several days, or comes with dehydration, rash/bruising, "
+            "urinary pain, or serious illness. Get emergency help for breathing trouble, chest pressure, confusion, seizure, "
+            "stiff neck, severe headache, purple rash, or not urinating."
         )
 
     if any(term in concern_lower for term in ("oral lesion", "mouth lesion", "lesion", "rash", "hives", "swelling")):
         return (
-            "RAG triage guidance for skin, mouth, rash, or allergy-like symptoms: mild localized symptoms without fever, "
-            "breathing trouble, facial or tongue swelling, severe pain, or spreading infection signs may be monitored. "
-            "Seek same-day care if there is fever, severe pain, rapidly spreading redness or swelling, pus, red streaks, "
-            "new bruising, blisters or raw skin over a large area, or involvement of the eyes, mouth, or genitals. "
-            "Seek emergency help now for trouble breathing, throat tightness, difficulty swallowing, swollen tongue, "
-            "face or throat swelling, fainting, or severe widespread symptoms after an exposure."
+            "For skin, mouth, rash, or allergy-like symptoms, monitor mild local symptoms only if there is no fever, "
+            "severe pain, spreading redness, or swelling. Get same-day care for fever, pus, red streaks, eye or genital "
+            "involvement, or fast-spreading symptoms. Get emergency help for breathing trouble, throat tightness, "
+            "trouble swallowing, tongue/face swelling, fainting, or severe widespread symptoms."
         )
 
     if any(term in concern_lower for term in ("vomit", "diarrhea", "stomach", "abdomen", "abdominal", "dehydration")):
         return (
-            "RAG triage guidance for stomach symptoms: for mild short-lived symptoms without red flags, focus on fluids, "
-            "oral rehydration, bland foods as tolerated, and avoiding alcohol. Seek same-day care for worsening or localized "
-            "abdominal pain, fever with abdominal pain, repeated vomiting, diarrhea lasting more than 2 days, dehydration, "
-            "blood or pus in stool, or black/tarry stool. Seek emergency help for severe abdominal pain, a hard/tender "
-            "abdomen, vomiting blood, confusion, fainting, or severe weakness."
+            "For stomach symptoms, use fluids, oral rehydration, and bland foods if symptoms are mild. "
+            "Get same-day care for worsening belly pain, repeated vomiting, diarrhea over 2 days, dehydration, blood or pus "
+            "in stool, or black stool. Get emergency help for severe pain, vomiting blood, confusion, fainting, or severe weakness."
         )
 
     if any(term in concern_lower for term in ("headache", "dizzy", "dizziness", "faint", "weakness", "numbness")):
         return (
-            "RAG triage guidance for headache or neurologic symptoms: seek emergency help for sudden severe headache, "
-            "worst headache, confusion, fainting, seizure, vision change, weakness or numbness, trouble speaking, or loss "
-            "of balance. If there are no red flags but symptoms are new, worsening, recurrent, or affecting daily activity, "
-            "arrange clinician review soon."
+            "For headache or neurologic symptoms, get emergency help for sudden severe headache, confusion, fainting, seizure, "
+            "vision changes, weakness, numbness, trouble speaking, or loss of balance. If there are no red flags but it is new, "
+            "worsening, recurring, or affecting daily life, arrange clinician review soon."
         )
 
     if any(term in concern_lower for term in ("chest", "breathing", "breath", "stroke", "confusion")):
         return (
-            "RAG triage guidance for chest pain, breathing trouble, or stroke-like symptoms: seek emergency help now for "
-            "chest pressure or pain lasting more than a few minutes, symptoms with sweating, nausea, dizziness, fainting, "
-            "jaw or arm pain, shortness of breath, sudden severe breathing difficulty, confusion, blue or pale lips, "
-            "face drooping, weakness, numbness, trouble speaking, vision loss, or sudden loss of balance."
+            "For chest pain, breathing trouble, or stroke-like symptoms, get emergency help now for chest pressure, shortness "
+            "of breath, sweating, nausea, fainting, jaw or arm pain, blue lips, confusion, face drooping, weakness, numbness, "
+            "trouble speaking, vision loss, or sudden loss of balance."
         )
 
     return (
@@ -318,6 +307,12 @@ def build_chat_reply(current_concern: str, patient_info: dict, doctor: Optional[
                      appointment_record: Optional[dict], booking_requested: bool,
                      requested_doctor_name: Optional[str], pinecone_context: str) -> str:
     concern = current_concern or "your concern"
+    display_concern = concern
+    concern_lower = concern.lower()
+    for known_concern in ("oral lesions", "mouth lesions", "fever", "cough", "headache", "diarrhea", "vomiting"):
+        if known_concern in concern_lower:
+            display_concern = known_concern
+            break
     patient_name = patient_info.get("name") if patient_info else None
 
     if appointment_record and doctor:
@@ -342,14 +337,13 @@ def build_chat_reply(current_concern: str, patient_info: dict, doctor: Optional[
 
     intro = "I've noted your concern"
     if patient_name and patient_name != "New Patient":
-        intro = f"I found your record, {patient_name}, and noted your concern"
+        intro = f"I found your record, {patient_name}. Concern"
 
     record_note = build_medical_record_note(patient_info)
     protocol_guidance = build_protocol_guidance(concern, pinecone_context)
     return (
-        f"{intro}: {concern}. {record_note} {protocol_guidance} "
-        "Try the safe self-care steps first if no red flags apply. If you have already tried these protocols and symptoms "
-        "are still continuing or worsening, tell me and I can help book an appointment."
+        f"{intro}: {display_concern}. {record_note} {protocol_guidance} "
+        "Try these steps if no red flags apply. If it continues or worsens, I can help book an appointment."
     )
 
 @router.post("/rag")
