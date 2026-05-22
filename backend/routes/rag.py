@@ -5,7 +5,6 @@ from fastapi import APIRouter
 from pymongo import MongoClient
 from backend.pinecone_helper import query_text
 from backend.schemas import Patient, Doctor, Appointment
-from backend.prompt import build_prompt
 from transformers import pipeline
 
 router = APIRouter()
@@ -17,8 +16,11 @@ patients_collection = db["patients"]
 doctors_collection = db["doctors"]
 appointments_collection = db["appointments"]
 
-# --- Hugging Face generator (distilgpt2 only) ---
-generator = pipeline("text-generation", model="distilgpt2")
+llm_generator = None
+llm_load_failed = False
+
+LLM_MODEL = os.getenv("LLM_MODEL", "google/flan-t5-small")
+LLM_TASK = os.getenv("LLM_TASK", "text2text-generation")
 
 def has_booking_intent(query: str) -> bool:
     query_lower = query.lower()
@@ -94,12 +96,148 @@ def create_new_patient(query: str, patient_id: Optional[str] = None,
     patients_collection.insert_one(patient_record.copy())
     return patient_record
 
-def local_llm(prompt: str) -> str:
+def get_llm_generator():
+    global llm_generator, llm_load_failed
+
+    if llm_generator or llm_load_failed:
+        return llm_generator
+
     try:
-        result = generator(prompt, max_new_tokens=128, return_full_text=False)
-        return result[0]["generated_text"].strip()
-    except Exception as e:
-        return f"⚠️ Local LLM failed: {str(e)}"
+        llm_generator = pipeline(LLM_TASK, model=LLM_MODEL)
+    except Exception:
+        llm_load_failed = True
+    return llm_generator
+
+def extract_required_terms(draft_reply: str) -> list:
+    terms = []
+    concern_match = re.search(r"concern:\s*([^.]+)", draft_reply, re.IGNORECASE)
+    if concern_match:
+        terms.extend(re.findall(r"[a-z0-9]+", concern_match.group(1).lower()))
+
+    booking_match = re.search(
+        r"with\s+(.+?)\s+on\s+([0-9-]+)\s+at\s+([0-9:]+)\s+for\s+([^.]+)",
+        draft_reply,
+        re.IGNORECASE
+    )
+    if booking_match:
+        for group in booking_match.groups():
+            terms.extend(re.findall(r"[a-z0-9]+", group.lower()))
+
+    return [term for term in terms if len(term) > 2 or term.isdigit()]
+
+def extract_concern_text(draft_reply: str) -> Optional[str]:
+    concern_match = re.search(r"concern:\s*([^.]+)", draft_reply, re.IGNORECASE)
+    return concern_match.group(1).strip() if concern_match else None
+
+def repair_llm_reply(reply: str, draft_reply: str) -> str:
+    concern = extract_concern_text(draft_reply)
+    if not concern:
+        return reply
+
+    reply_lower = reply.lower()
+    concern_terms = re.findall(r"[a-z0-9]+", concern.lower())
+    if any(term not in reply_lower for term in concern_terms):
+        reply = f"I've noted your concern: {concern}. {reply}"
+
+    reply_lower = reply.lower()
+    if "urgent" in draft_reply.lower() and "urgent" not in reply_lower:
+        reply = (
+            f"{reply.rstrip()} If symptoms are severe, worsening, or urgent, "
+            "please seek immediate medical care."
+        )
+    return reply
+
+def is_safe_llm_reply(reply: str, draft_reply: str) -> bool:
+    if not reply:
+        return False
+
+    blocked_terms = (
+        "background information",
+        "patient info",
+        "doctor info",
+        "appointment requests",
+        "draft response",
+        "prompt",
+        "medical history",
+        "i'd like to book",
+        "i would like to book",
+        "i want to book",
+    )
+    reply_lower = reply.lower()
+    if any(term in reply_lower for term in blocked_terms):
+        return False
+
+    words = reply.split()
+    if not 3 <= len(words) <= 90:
+        return False
+
+    reply_lower = reply.lower()
+    return all(term in reply_lower for term in extract_required_terms(draft_reply))
+
+def naturalize_reply(draft_reply: str) -> tuple:
+    generator = get_llm_generator()
+    if not generator:
+        return draft_reply, "rule-based-fallback"
+
+    required_terms = ", ".join(extract_required_terms(draft_reply)) or "same facts"
+    prompt = (
+        "Rewrite this medical appointment assistant response in a warm, natural tone. "
+        "Keep the same facts. Do not add diagnosis, treatment, medical history, or extra booking details. "
+        f"Your reply must include these exact details: {required_terms}. "
+        "Return only the patient-facing reply.\n\n"
+        f"Draft response: {draft_reply}"
+    )
+
+    try:
+        generation_args = {"max_new_tokens": 90, "do_sample": False}
+        if LLM_TASK == "text-generation":
+            generation_args["return_full_text"] = False
+
+        result = generator(prompt, **generation_args)
+        reply = result[0].get("generated_text", "").strip()
+    except Exception:
+        return draft_reply, "rule-based-fallback"
+
+    reply = repair_llm_reply(reply, draft_reply)
+    if not is_safe_llm_reply(reply, draft_reply):
+        return draft_reply, "rule-based-fallback"
+    return reply, f"llm:{LLM_MODEL}"
+
+def build_chat_reply(current_concern: str, patient_info: dict, doctor: Optional[dict],
+                     appointment_record: Optional[dict], booking_requested: bool,
+                     requested_doctor_name: Optional[str]) -> str:
+    concern = current_concern or "your concern"
+    patient_name = patient_info.get("name") if patient_info else None
+
+    if appointment_record and doctor:
+        return (
+            f"I've booked your appointment with {doctor.get('name', 'the doctor')} "
+            f"on {appointment_record.get('date')} at {appointment_record.get('time')} "
+            f"for {appointment_record.get('reason')}."
+        )
+
+    if booking_requested:
+        if doctor:
+            return (
+                f"I found {doctor.get('name', 'the doctor')}, but there are no open slots "
+                "available right now. Please try another doctor or a different time."
+            )
+        if requested_doctor_name:
+            return (
+                f"I couldn't find Dr. {requested_doctor_name.title()} in the doctor records. "
+                "Please check the doctor's name or choose another doctor."
+            )
+        return "Please share the doctor's name so I can check availability and book the appointment."
+
+    intro = "I've noted your concern"
+    if patient_name and patient_name != "New Patient":
+        intro = f"I found your record, {patient_name}, and noted your concern"
+
+    return (
+        f"{intro}: {concern}. Would you like me to book an appointment for this? "
+        "If yes, please tell me the doctor's name. If symptoms are severe, worsening, "
+        "or urgent, please seek immediate medical care."
+    )
 
 @router.post("/rag")
 def rag_pipeline(query: str, patient_id: Optional[str] = None,
@@ -117,7 +255,7 @@ def rag_pipeline(query: str, patient_id: Optional[str] = None,
                 "appointment": None
             },
             "reply": "I can help with that. Please share your patient ID or your name so I can find or create your record.",
-            "source": "distilgpt2"
+            "source": "rule-based"
         }
 
     # Step 1: Pinecone retrieval (may return list[str] or None)
@@ -162,7 +300,7 @@ def rag_pipeline(query: str, patient_id: Optional[str] = None,
                 "appointment": None
             },
             "reply": "Thanks. What concern or symptoms would you like help with today?",
-            "source": "distilgpt2"
+            "source": "rule-based"
         }
 
     doctor = None
@@ -213,20 +351,15 @@ def rag_pipeline(query: str, patient_id: Optional[str] = None,
         "appointment": appointment_model.dict() if appointment_model else None
     }
 
-    # Step 5: Build prompt using helper (pinecone_context is a str now)
-    prompt = build_prompt(
-        query=query,
-        pinecone_context=pinecone_context,
+    draft_reply = build_chat_reply(
+        current_concern=current_concern,
         patient_info=patient_info,
-        doctor_info=doctor,
-        appointment_record=appointment_record
+        doctor=doctor,
+        appointment_record=appointment_record,
+        booking_requested=booking_requested,
+        requested_doctor_name=doctor_name
     )
-
-    if booking_requested and doctor and not current_concern:
-        reply = "Before I book that appointment, what concern or symptoms should I include for the doctor?"
-    else:
-        reply = local_llm(prompt)
-    source = "distilgpt2"
+    reply, source = naturalize_reply(draft_reply)
 
     return {
         "query": query,
