@@ -3,9 +3,10 @@ from pydantic import BaseModel
 from typing import List
 from pymongo import MongoClient
 from bson import ObjectId
+import os
 
 # MongoDB connection
-client = MongoClient("mongodb://localhost:27017")
+client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
 db = client["appointment_bot"]
 patients_collection = db["patients"]
 doctors_collection = db["doctors"]
@@ -83,6 +84,14 @@ def book_appointment(appointment: Appointment):
     )
     if not available:
         return {"error": "Doctor not available at this time"}
+
+    existing = appointments_collection.find_one({
+        "doctor_id": appointment.doctor_id,
+        "date": appointment.date,
+        "time": appointment.time
+    })
+    if existing:
+        return {"error": "Doctor already booked at this time"}
 
     # Save appointment
     appointments_collection.insert_one(appointment.dict())

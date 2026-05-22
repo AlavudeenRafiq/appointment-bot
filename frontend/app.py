@@ -68,9 +68,14 @@ if query:
     # Spinner while backend processes
     with st.spinner("🤔 Assistant is thinking..."):
         try:
+            params = {"query": query}
+            patient_info = st.session_state["context"].get("patient_info") or {}
+            if patient_info.get("patient_id"):
+                params["patient_id"] = patient_info["patient_id"]
+
             response = requests.post(
                 "http://localhost:8000/rag",
-                params={"query": query, "patient_id": "P001"}
+                params=params
             )
             data = response.json()
             reply = data.get("reply", "⚠️ No reply")

@@ -1,10 +1,10 @@
 from fastapi import FastAPI
-from backend.routes import rag   # import your rag router
+from backend.routes import appointment, rag
 
 app = FastAPI()
 
-# include the rag router
 app.include_router(rag.router)
+app.include_router(appointment.router)
 
 @app.get("/")
 def health_check():
