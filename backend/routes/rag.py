@@ -38,17 +38,33 @@ def extract_patient_name(query: str) -> Optional[str]:
         query,
         re.IGNORECASE
     )
-    return match.group(1).title() if match else None
+    if not match:
+        return None
+
+    stop_words = {"i", "and", "am", "have", "having", "with", "for", "please", "book", "schedule"}
+    name_parts = []
+    for word in match.group(1).split():
+        if word.lower() in stop_words:
+            break
+        name_parts.append(word)
+    return " ".join(name_parts).title() or None
 
 def remove_patient_details(query: str) -> str:
     query = re.sub(r"\b(?:my\s+)?(?:patient\s+)?id(?:\s+is)?\s*[:#]?\s*P\d+\b", " ", query, flags=re.IGNORECASE)
     query = re.sub(r"\bP\d+\b", " ", query, flags=re.IGNORECASE)
     query = re.sub(
-        r"\b(?:my name is|i am|i'm|this is)\s+[a-z]+(?:\s+[a-z]+)?",
+        r"\b(?:my name is|this is)\s+[a-z]+(?:\s+[a-z]+)?(?=\s+(?:and|i\s+am|i'm|i\s+have|have|having|with|for|please)\b|[.?!,;:]|$)",
         " ",
         query,
         flags=re.IGNORECASE
     )
+    query = re.sub(
+        r"\b(?:i am|i'm)\s+(?!having\b)[a-z]+(?:\s+[a-z]+)?(?=\s+(?:and|i\s+have|have|having|with|for|please)\b|[.?!,;:]|$)",
+        " ",
+        query,
+        flags=re.IGNORECASE
+    )
+    query = re.sub(r"^\s*(?:hi|hello|hey)\b[, ]*", " ", query, flags=re.IGNORECASE)
     query = " ".join(query.strip(" .,:;?!").split())
     return re.sub(r"^(?:and\s+)+", "", query, flags=re.IGNORECASE)
 
