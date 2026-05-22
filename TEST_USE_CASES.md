@@ -1,201 +1,262 @@
 # Appointment Bot Conversation Test Scripts
 
-Use these scripts as literal chat conversations in the Streamlit app or as the `query` value for `POST /rag`. The assistant wording may vary because the local model generates text, but the expected behavior after each script should match.
+Use these as literal conversations in the Streamlit app or as `POST /rag` requests. The assistant wording can vary because an LLM may rewrite safe drafts, but the required facts and behavior must match.
 
 ## Setup
 
 Start MongoDB, then start the backend and frontend.
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 USE_TF=0 USE_FLAX=0 MONGO_URI=mongodb://localhost:27017 python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+PYTHONDONTWRITEBYTECODE=1 USE_TF=0 USE_FLAX=0 MONGO_URI=mongodb://localhost:27017 PINECONE_NAMESPACE=triage-v1 python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
 ```bash
 streamlit run frontend/app.py --server.address 127.0.0.1 --server.port 8501
 ```
 
-Open `http://127.0.0.1:8501`.
+Seed the current RAG dataset when Pinecone is empty or the PDF changes.
 
-## Conversation 1: User Gives Concern Before Identity
+```bash
+python -m backend.seed_pinecone
+```
 
-Precondition: No patient context exists in the current chat session.
+Current dataset:
+
+```text
+backend/data/basic_medical_triage_rag_dataset.pdf
+```
+
+Open:
+
+```text
+http://127.0.0.1:8501
+```
+
+## Conversation 1: Concern Before Identity
+
+Precondition: no patient context exists in the current chat session.
 
 ```text
 Patient: I have fever and body pain.
 Assistant: Please share your patient ID or your name so I can find or create your record.
 ```
 
-Expected result: no appointment is created yet, and no default patient such as `P001` is assumed.
+Expected result: no appointment is created and no default patient such as `P001` is assumed.
 
-## Conversation 2: Existing Patient Shares Current Concern
+## Conversation 2: Existing Patient Gives Identity First
 
 Precondition: patient `P001` exists in MongoDB.
 
 ```text
-Patient: My patient ID is P001 and I have fever since yesterday.
-Assistant: Responds to the fever concern using the patient context.
+Patient: p001
+Assistant: What concern or symptoms would you like help with today?
 ```
 
-Expected result: patient `P001` is found, the current concern is saved as `I have fever since yesterday`, and no appointment is created unless the user asks to book one.
+Expected result: patient `P001` is loaded into context, but no appointment is created.
 
-## Conversation 3: Existing Patient Gives Identity First
+## Conversation 3: Fever Gets RAG Protocols Before Booking
 
-Precondition: patient `P001` exists in MongoDB.
+Precondition: patient `P001` exists with medical history, for example `Hypertension`.
 
 ```text
-Patient: My patient ID is P001.
+Patient: p001
 Assistant: What concern or symptoms would you like help with today?
 
-Patient: I have a sore throat.
-Assistant: Responds to the sore throat concern using the patient context.
+Patient: fever
+Assistant: Notes the fever, references the patient medical record, gives fever/respiratory RAG triage guidance, and asks the patient to try safe self-care first if no red flags apply.
 ```
 
-Expected result: patient `P001` is found after the first message, then the second message updates the current concern to `I have a sore throat`.
+Expected result:
 
-## Conversation 4: New Patient Gives Name And Concern
+- patient concern is saved as `fever`
+- reply mentions the patient history summary such as `Hypertension`
+- reply includes fever protocol content such as rest, fluids, fever-free for 24 hours, `103 F / 39.4 C`, red flags, and emergency escalation
+- no appointment is created from the fever message alone
 
-Precondition: no patient with the generated test name is already needed for this run.
+## Conversation 4: Follow-Up Booking Uses Stored Concern
+
+Precondition: patient `P001` has stored concern `fever` and preferred doctor `D_PROTOCOL_TEST`; that doctor has an open slot.
+
+```text
+Patient: yes, book an appointment
+Assistant: Confirms the appointment with doctor name, date, and time.
+```
+
+Expected result: appointment is created with reason `fever`, not `yes`.
+
+## Conversation 5: Booking Requires Concern When No Stored Concern Exists
+
+Precondition: patient `P001` exists but has no current concern.
+
+```text
+Patient: p001
+Assistant: What concern or symptoms would you like help with today?
+
+Patient: Please book Dr. Smith.
+Assistant: What concern or symptoms would you like help with today?
+```
+
+Expected result: no appointment is created because the assistant still needs a symptom or reason.
+
+## Conversation 6: Booking With Explicit Doctor And Concern
+
+Precondition: patient `P001` exists. Doctor `Dr. Smith` has an open slot.
+
+```text
+Patient: My patient ID is P001. Please book Dr. Smith for chest pain.
+Assistant: Confirms the appointment with Dr. Smith, date, and time.
+```
+
+Expected result: appointment is created with reason `chest pain`.
+
+## Conversation 7: New Patient Gets Protocol Guidance
+
+Precondition: no patient with name `Test Patient` is needed for this run.
 
 ```text
 Patient: My name is Test Patient and I have cough.
-Assistant: Responds to the cough concern after creating or finding the patient record.
+Assistant: Creates or finds the patient, notes cough, says no prior medical conditions are listed, and gives respiratory RAG guidance before offering appointment help.
 ```
 
-Expected result: a new patient record is created with name `Test Patient`, empty medical history, and concern `I have cough`.
+Expected result: a new patient is created with name `Test Patient`, empty medical history, concern `I have cough`, and no appointment.
 
-## Conversation 5: New Patient Gives Name First
+## Conversation 8: Name-Only New Patient Then Symptom
 
-Precondition: no patient with the generated test name is already needed for this run.
+Precondition: no patient with name `Fresh Patient` is needed for this run.
 
 ```text
 Patient: My name is Fresh Patient.
 Assistant: What concern or symptoms would you like help with today?
 
-Patient: I have headache and nausea.
-Assistant: Responds to the headache and nausea concern.
+Patient: I have headache and dizziness.
+Assistant: Notes headache and dizziness, gives headache/neurologic triage guidance, and does not book yet.
 ```
 
-Expected result: a new patient record is created, then its concern is updated from the second message.
+Expected result: new patient is created, then its concern is updated from the second message.
 
-## Conversation 6: Booking Request Without Concern
+## Conversation 9: Oral Lesions Use Skin/Mouth Protocol
 
-Precondition: patient `P001` exists, and doctor `Dr. Smith` exists.
+Precondition: patient `P001` exists.
 
 ```text
-Patient: My patient ID is P001. Please book Dr. Smith.
+Patient: p001
 Assistant: What concern or symptoms would you like help with today?
+
+Patient: I am having oral lesions.
+Assistant: Gives skin/mouth/allergy-style RAG triage guidance, including same-day care and emergency escalation signs.
 ```
 
-Expected result: no appointment is created because the assistant still needs the reason for the visit.
+Expected result: no appointment is created from the symptom alone.
 
-## Conversation 7: Booking Request With Current Concern
+## Conversation 10: Stomach Symptoms Use GI Protocol
 
-Precondition: patient `P001` exists. Doctor `Dr. Smith` exists with at least one free availability slot.
+Precondition: patient `P001` exists.
 
 ```text
-Patient: My patient ID is P001. Please book Dr. Smith for chest pain.
-Assistant: Responds with an appointment booking confirmation or appointment-related response.
+Patient: My patient ID is P001 and I have vomiting and diarrhea.
+Assistant: Gives stomach/GI RAG triage guidance, including fluids, dehydration, blood in stool or vomit, and escalation signs.
 ```
 
-Expected result: one appointment is created for `P001`, using `Dr. Smith` and reason `chest pain`.
+Expected result: no appointment is created from the symptom alone.
 
-## Conversation 8: Stored Old Concern Must Not Be Reused
+## Conversation 11: Unknown Symptom Asks For More Details
 
-Precondition: patient `P001` exists and has an old stored concern such as `old knee pain`. Doctor `Dr. Smith` has a free availability slot.
+Precondition: patient `P001` exists.
 
 ```text
-Patient: My patient ID is P001. Please book Dr. Smith for sore throat.
-Assistant: Responds with an appointment booking confirmation or appointment-related response.
+Patient: My patient ID is P001 and I feel strange.
+Assistant: Says it does not have a specific first-aid protocol for that symptom and asks for duration, severity, major conditions, medicines, and red flags.
 ```
 
-Expected result: the new appointment reason is `sore throat`, not the old stored concern.
+Expected result: no appointment is created from the unclear symptom alone.
 
-## Conversation 9: Already Booked First Slot
+## Conversation 12: Already Booked First Slot
 
-Precondition: doctor `Dr. Smith` has two availability slots, and the first slot already has an appointment.
+Precondition: doctor `Dr. Smith` has two availability slots and the first slot is already booked.
 
 ```text
 Patient: My patient ID is P001. Please book Dr. Smith for cough.
-Assistant: Responds with an appointment booking confirmation or appointment-related response.
+Assistant: Confirms the appointment.
 ```
 
-Expected result: the appointment is created in the next free slot, not the already booked slot.
+Expected result: appointment is created in the next free slot, not the already booked slot.
 
-## Conversation 10: All Doctor Slots Already Booked
+## Conversation 13: All Doctor Slots Booked
 
 Precondition: doctor `Dr. Smith` exists, but every availability slot already has an appointment.
 
 ```text
 Patient: My patient ID is P001. Please book Dr. Smith for cough.
-Assistant: Responds without crashing.
+Assistant: Says no open slots are available and suggests another doctor or time.
 ```
 
-Expected result: no duplicate appointment is created for any already booked slot.
+Expected result: no duplicate appointment is created.
 
-## Conversation 11: Doctor Has Empty Availability
+## Conversation 14: Empty Doctor Availability
 
 Precondition: doctor `Dr. Empty` exists with `availability: []`.
 
 ```text
 Patient: My patient ID is P001. Please book Dr. Empty for cough.
-Assistant: Responds without crashing.
+Assistant: Responds without crashing and says no open slots are available.
 ```
 
-Expected result: no appointment is created, and the backend does not raise an `IndexError`.
+Expected result: no appointment is created and no `IndexError` occurs.
 
-## Conversation 12: Unknown Doctor
+## Conversation 15: Unknown Doctor
 
 Precondition: patient `P001` exists. No doctor named `Dr. Unknown` exists.
 
 ```text
 Patient: My patient ID is P001. Please book Dr. Unknown for fever.
-Assistant: Responds without crashing.
+Assistant: Says Dr. Unknown cannot be found and asks the user to check the name or choose another doctor.
 ```
 
-Expected result: no appointment is created because the requested doctor cannot be found.
+Expected result: no appointment is created.
 
-## Conversation 13: Privacy Check
+## Conversation 16: Privacy Check
 
-Precondition: patient `P001` exists with medical history containing a unique diagnosis or treatment string.
+Precondition: patient `P001` exists with medical history containing a unique treatment string.
 
 ```text
 Patient: My patient ID is P001 and I have stomach pain.
-Assistant: Responds to the stomach pain concern.
+Assistant: Gives stomach/GI triage guidance.
 ```
 
-Expected result: the assistant reply does not echo internal prompt text, raw medical history, or labels such as `Background information`, `Patient info`, `Doctor info`, or `Appointment`.
+Expected result: the reply does not echo internal prompt text, raw treatment strings, or labels such as `Background information`, `Patient info`, `Doctor info`, or `Appointment`.
 
-## Conversation 14: Frontend Context Continues After Identity
+## Conversation 17: Frontend Context Continues After Identity
 
 Precondition: patient `P001` exists. Use the Streamlit chat input only.
 
 ```text
-Patient: My patient ID is P001.
+Patient: p001
 Assistant: What concern or symptoms would you like help with today?
 
-Patient: I have fever.
-Assistant: Responds to the fever concern using the same patient context.
+Patient: fever
+Assistant: Gives fever protocol guidance using the same patient context.
 ```
 
 Expected result: the frontend does not require a sidebar patient field and does not hardcode `P001`; it continues with the patient context returned by the backend.
 
-## Conversation 15: Frontend New Patient Flow
+## Conversation 18: Frontend Follow-Up Booking
 
-Precondition: use a unique patient name for the run.
+Precondition: patient `P001` exists, has a preferred doctor with an open slot, and sends symptom before booking.
 
 ```text
-Patient: My name is Frontend Test and I have cough.
-Assistant: Responds to the cough concern after creating or finding the patient record.
+Patient: p001
+Assistant: What concern or symptoms would you like help with today?
 
-Patient: Please book Dr. Smith for cough.
-Assistant: Responds with an appointment booking confirmation or appointment-related response.
+Patient: fever
+Assistant: Gives fever protocol guidance before booking.
+
+Patient: yes, book an appointment
+Assistant: Confirms appointment.
 ```
 
-Expected result: the frontend sends the first identity from chat content, then continues with the returned patient context on the second message.
+Expected result: frontend books with reason `fever`, not `yes`.
 
 ## Direct API Conversations
-
-These are the same conversations as API calls when testing without the frontend.
 
 ```text
 POST /rag?query=I%20have%20fever
@@ -203,20 +264,25 @@ Assistant: Please share your patient ID or your name so I can find or create you
 ```
 
 ```text
-POST /rag?query=My%20patient%20ID%20is%20P001%20and%20I%20have%20fever
-Assistant: Responds to the fever concern using patient P001.
+POST /rag?query=p001
+Assistant: What concern or symptoms would you like help with today?
 ```
 
 ```text
-POST /rag?query=My%20name%20is%20API%20Patient%20and%20I%20have%20cough
-Assistant: Responds to the cough concern after creating a new patient.
+POST /rag?query=fever&patient_id=P001
+Assistant: Gives patient-record-aware fever RAG protocol guidance and does not create an appointment.
+```
+
+```text
+POST /rag?query=yes,%20book%20an%20appointment&patient_id=P001
+Assistant: Books using the stored concern if a preferred doctor has availability.
 ```
 
 ```text
 POST /rag?query=My%20patient%20ID%20is%20P001.%20Please%20book%20Dr.%20Smith%20for%20chest%20pain
-Assistant: Responds with an appointment booking confirmation or appointment-related response.
+Assistant: Books with reason chest pain.
 ```
 
 ## Cleanup
 
-After each run, delete temporary records created for test patients, doctors, and appointments. Prefer unique test names and IDs such as `API Patient`, `Frontend Test`, `P_API_TEST_*`, and `D_API_TEST_*`.
+After each run, delete temporary records created for test patients, doctors, and appointments. Prefer unique test names and IDs such as `Test Patient`, `Fresh Patient`, `P_API_TEST_*`, `D_PROTOCOL_TEST`, and `D_API_TEST_*`.

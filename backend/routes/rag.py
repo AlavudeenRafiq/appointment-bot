@@ -26,6 +26,19 @@ def has_booking_intent(query: str) -> bool:
     query_lower = query.lower()
     return any(term in query_lower for term in ("book", "appointment", "schedule"))
 
+def is_booking_followup_concern(concern: str) -> bool:
+    normalized = " ".join(re.findall(r"[a-z]+", concern.lower()))
+    return normalized in {
+        "",
+        "yes",
+        "yes book",
+        "yes appointment",
+        "book",
+        "book appointment",
+        "schedule",
+        "schedule appointment"
+    }
+
 def extract_doctor_name(query: str) -> Optional[str]:
     match = re.search(r"\bdr\.?\s+([a-z]+)", query, re.IGNORECASE)
     return match.group(1) if match else None
@@ -123,7 +136,27 @@ def extract_required_terms(draft_reply: str) -> list:
         for group in booking_match.groups():
             terms.extend(re.findall(r"[a-z0-9]+", group.lower()))
 
+    draft_lower = draft_reply.lower()
+    if "rag triage guidance for fever" in draft_lower:
+        terms.extend(["fever", "rest", "fluids", "103"])
+    if "rag triage guidance for skin" in draft_lower:
+        terms.extend(["fever", "swelling", "breathing"])
+    if "rag triage guidance for stomach" in draft_lower:
+        terms.extend(["fluids", "dehydration", "blood"])
+    if "rag triage guidance for headache" in draft_lower:
+        terms.extend(["headache", "confusion", "weakness"])
+
     return [term for term in terms if len(term) > 2 or term.isdigit()]
+
+def has_repeated_phrase(reply: str) -> bool:
+    phrases = re.findall(r"[^.!?]+[.!?]", reply)
+    counts = {}
+    for phrase in phrases:
+        normalized = " ".join(phrase.lower().split())
+        counts[normalized] = counts.get(normalized, 0) + 1
+        if counts[normalized] > 2:
+            return True
+    return False
 
 def extract_concern_text(draft_reply: str) -> Optional[str]:
     concern_match = re.search(r"concern:\s*([^.]+)", draft_reply, re.IGNORECASE)
@@ -157,14 +190,20 @@ def is_safe_llm_reply(reply: str, draft_reply: str) -> bool:
         "doctor info",
         "appointment requests",
         "draft response",
+        "response:",
+        "assistant:",
         "prompt",
         "medical history",
         "i'd like to book",
         "i would like to book",
         "i want to book",
+        "i'm a doctor",
+        "i am a doctor",
     )
     reply_lower = reply.lower()
     if any(term in reply_lower for term in blocked_terms):
+        return False
+    if has_repeated_phrase(reply):
         return False
 
     words = reply.split()
@@ -196,16 +235,88 @@ def naturalize_reply(draft_reply: str) -> tuple:
         result = generator(prompt, **generation_args)
         reply = result[0].get("generated_text", "").strip()
     except Exception:
-        return draft_reply, "rule-based-fallback"
+        return draft_reply, f"llm-error-fallback:{LLM_MODEL}"
 
     reply = repair_llm_reply(reply, draft_reply)
     if not is_safe_llm_reply(reply, draft_reply):
-        return draft_reply, "rule-based-fallback"
+        return draft_reply, f"llm-guard-fallback:{LLM_MODEL}"
     return reply, f"llm:{LLM_MODEL}"
+
+def build_medical_record_note(patient_info: dict) -> str:
+    history = patient_info.get("medical_history") or []
+    diagnoses = []
+    for item in history:
+        diagnosis = item.get("diagnosis") if isinstance(item, dict) else None
+        if diagnosis and diagnosis not in diagnoses:
+            diagnoses.append(diagnosis)
+
+    if not diagnoses:
+        return "I do not see prior medical conditions listed in your record."
+
+    diagnosis_text = ", ".join(diagnoses[:3])
+    return (
+        f"I see this in your medical record: {diagnosis_text}. "
+        "That does not diagnose the current symptom, but it is relevant when deciding how cautious to be."
+    )
+
+def build_protocol_guidance(current_concern: str, pinecone_context: str) -> str:
+    concern_lower = current_concern.lower()
+
+    if any(term in concern_lower for term in ("fever", "cold", "cough", "sore throat", "body pain")):
+        return (
+            "RAG triage guidance for fever or respiratory symptoms: if symptoms are mild and there are no red flags, "
+            "start with rest, fluids, and over-the-counter medicines only as directed on the label or by a clinician. "
+            "Stay home and away from others until symptoms are improving and fever has been gone for at least 24 hours "
+            "without fever-reducing medicine. Seek same-day care if fever is 103 F / 39.4 C or higher, lasts several days, "
+            "comes with dehydration, rash or bruising, pain with urination, or serious underlying illness. Seek emergency "
+            "help now for trouble breathing, chest or abdominal pressure, confusion, seizure, stiff neck, severe headache, "
+            "purple non-blanching rash, not urinating, or looking very ill."
+        )
+
+    if any(term in concern_lower for term in ("oral lesion", "mouth lesion", "lesion", "rash", "hives", "swelling")):
+        return (
+            "RAG triage guidance for skin, mouth, rash, or allergy-like symptoms: mild localized symptoms without fever, "
+            "breathing trouble, facial or tongue swelling, severe pain, or spreading infection signs may be monitored. "
+            "Seek same-day care if there is fever, severe pain, rapidly spreading redness or swelling, pus, red streaks, "
+            "new bruising, blisters or raw skin over a large area, or involvement of the eyes, mouth, or genitals. "
+            "Seek emergency help now for trouble breathing, throat tightness, difficulty swallowing, swollen tongue, "
+            "face or throat swelling, fainting, or severe widespread symptoms after an exposure."
+        )
+
+    if any(term in concern_lower for term in ("vomit", "diarrhea", "stomach", "abdomen", "abdominal", "dehydration")):
+        return (
+            "RAG triage guidance for stomach symptoms: for mild short-lived symptoms without red flags, focus on fluids, "
+            "oral rehydration, bland foods as tolerated, and avoiding alcohol. Seek same-day care for worsening or localized "
+            "abdominal pain, fever with abdominal pain, repeated vomiting, diarrhea lasting more than 2 days, dehydration, "
+            "blood or pus in stool, or black/tarry stool. Seek emergency help for severe abdominal pain, a hard/tender "
+            "abdomen, vomiting blood, confusion, fainting, or severe weakness."
+        )
+
+    if any(term in concern_lower for term in ("headache", "dizzy", "dizziness", "faint", "weakness", "numbness")):
+        return (
+            "RAG triage guidance for headache or neurologic symptoms: seek emergency help for sudden severe headache, "
+            "worst headache, confusion, fainting, seizure, vision change, weakness or numbness, trouble speaking, or loss "
+            "of balance. If there are no red flags but symptoms are new, worsening, recurrent, or affecting daily activity, "
+            "arrange clinician review soon."
+        )
+
+    if any(term in concern_lower for term in ("chest", "breathing", "breath", "stroke", "confusion")):
+        return (
+            "RAG triage guidance for chest pain, breathing trouble, or stroke-like symptoms: seek emergency help now for "
+            "chest pressure or pain lasting more than a few minutes, symptoms with sweating, nausea, dizziness, fainting, "
+            "jaw or arm pain, shortness of breath, sudden severe breathing difficulty, confusion, blue or pale lips, "
+            "face drooping, weakness, numbness, trouble speaking, vision loss, or sudden loss of balance."
+        )
+
+    return (
+        "I do not have a specific first-aid protocol for that symptom in the retrieved dataset. Please tell me the duration, "
+        "severity, age, pregnancy status if relevant, major conditions, medicines, and any red flags such as breathing trouble, "
+        "chest pain, confusion, severe pain, dehydration, bleeding, or rapidly worsening symptoms."
+    )
 
 def build_chat_reply(current_concern: str, patient_info: dict, doctor: Optional[dict],
                      appointment_record: Optional[dict], booking_requested: bool,
-                     requested_doctor_name: Optional[str]) -> str:
+                     requested_doctor_name: Optional[str], pinecone_context: str) -> str:
     concern = current_concern or "your concern"
     patient_name = patient_info.get("name") if patient_info else None
 
@@ -233,10 +344,12 @@ def build_chat_reply(current_concern: str, patient_info: dict, doctor: Optional[
     if patient_name and patient_name != "New Patient":
         intro = f"I found your record, {patient_name}, and noted your concern"
 
+    record_note = build_medical_record_note(patient_info)
+    protocol_guidance = build_protocol_guidance(concern, pinecone_context)
     return (
-        f"{intro}: {concern}. Would you like me to book an appointment for this? "
-        "If yes, please tell me the doctor's name. If symptoms are severe, worsening, "
-        "or urgent, please seek immediate medical care."
+        f"{intro}: {concern}. {record_note} {protocol_guidance} "
+        "Try the safe self-care steps first if no red flags apply. If you have already tried these protocols and symptoms "
+        "are still continuing or worsening, tell me and I can help book an appointment."
     )
 
 @router.post("/rag")
@@ -281,9 +394,20 @@ def rag_pipeline(query: str, patient_id: Optional[str] = None,
     patient_info = None
     if patient_id:
         patient_info = patients_collection.find_one({"patient_id": patient_id}, {"_id": 0})
+
+    update_patient_concern = bool(current_concern)
+    if (
+        patient_info
+        and booking_requested
+        and is_booking_followup_concern(current_concern)
+        and patient_info.get("concern")
+    ):
+        current_concern = patient_info.get("concern")
+        update_patient_concern = False
+
     if not patient_info:
         patient_info = create_new_patient(current_concern or "Not provided", patient_id, patient_name)
-    elif current_concern:
+    elif update_patient_concern:
         patient_info["concern"] = current_concern
         patients_collection.update_one(
             {"patient_id": patient_info.get("patient_id")},
@@ -357,7 +481,8 @@ def rag_pipeline(query: str, patient_id: Optional[str] = None,
         doctor=doctor,
         appointment_record=appointment_record,
         booking_requested=booking_requested,
-        requested_doctor_name=doctor_name
+        requested_doctor_name=doctor_name,
+        pinecone_context=pinecone_context
     )
     reply, source = naturalize_reply(draft_reply)
 
