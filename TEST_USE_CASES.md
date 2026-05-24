@@ -1,5 +1,9 @@
 # Appointment Bot Conversation Test Scripts
 
+## Purpose
+
+The Appointment Bot streamlines scheduling and care by understanding each patient as an individual.
+
 Use these as literal conversations in the Streamlit app or as `POST /rag` requests. The assistant wording can vary because an LLM may rewrite safe drafts, but the required facts and behavior must match.
 
 ## Setup
@@ -75,11 +79,11 @@ Expected result:
 
 ## Conversation 4: Follow-Up Booking Uses Stored Concern
 
-Precondition: patient `P001` has stored concern `fever` and preferred doctor `D_PROTOCOL_TEST`; that doctor has an open slot.
+Precondition: patient `P001` has stored concern `fever` and preferred doctor `D_PROTOCOL_TEST`; that doctor has an available day.
 
 ```text
 Patient: yes, book an appointment
-Assistant: Confirms the appointment with doctor name, date, and time.
+Assistant: Confirms the appointment with doctor name and available day.
 ```
 
 Expected result: appointment is created with reason `fever`, not `yes`.
@@ -100,11 +104,11 @@ Expected result: no appointment is created because the assistant still needs a s
 
 ## Conversation 6: Booking With Explicit Doctor And Concern
 
-Precondition: patient `P001` exists. Doctor `Dr. Smith` has an open slot.
+Precondition: patient `P001` exists. Doctor `Dr. Smith` has an available day.
 
 ```text
 Patient: My patient ID is P001. Please book Dr. Smith for chest pain.
-Assistant: Confirms the appointment with Dr. Smith, date, and time.
+Assistant: Confirms the appointment with Dr. Smith and available day.
 ```
 
 Expected result: appointment is created with reason `chest pain`.
@@ -170,24 +174,24 @@ Assistant: Says it does not have a specific first-aid protocol for that symptom 
 
 Expected result: no appointment is created from the unclear symptom alone.
 
-## Conversation 12: Already Booked First Slot
+## Conversation 12: Already Booked First Availability
 
-Precondition: doctor `Dr. Smith` has two availability slots and the first slot is already booked.
+Precondition: doctor `Dr. Smith` has two day-level availability entries and the first one is already booked.
 
 ```text
 Patient: My patient ID is P001. Please book Dr. Smith for cough.
 Assistant: Confirms the appointment.
 ```
 
-Expected result: appointment is created in the next free slot, not the already booked slot.
+Expected result: appointment is created in the next free availability, not the already booked one.
 
 ## Conversation 13: All Doctor Slots Booked
 
-Precondition: doctor `Dr. Smith` exists, but every availability slot already has an appointment.
+Precondition: doctor `Dr. Smith` exists, but every availability entry already has an appointment.
 
 ```text
 Patient: My patient ID is P001. Please book Dr. Smith for cough.
-Assistant: Says no open slots are available and suggests another doctor or time.
+Assistant: Says no open availability is available and suggests another doctor or day.
 ```
 
 Expected result: no duplicate appointment is created.
@@ -198,7 +202,7 @@ Precondition: doctor `Dr. Empty` exists with `availability: []`.
 
 ```text
 Patient: My patient ID is P001. Please book Dr. Empty for cough.
-Assistant: Responds without crashing and says no open slots are available.
+Assistant: Responds without crashing and says no open availability is available.
 ```
 
 Expected result: no appointment is created and no `IndexError` occurs.
@@ -241,7 +245,7 @@ Expected result: the frontend does not require a sidebar patient field and does 
 
 ## Conversation 18: Frontend Follow-Up Booking
 
-Precondition: patient `P001` exists, has a preferred doctor with an open slot, and sends symptom before booking.
+Precondition: patient `P001` exists, has a preferred doctor with an available day, and sends symptom before booking.
 
 ```text
 Patient: p001
@@ -255,6 +259,37 @@ Assistant: Confirms appointment.
 ```
 
 Expected result: frontend books with reason `fever`, not `yes`.
+
+## Conversation 19: Medical History Informs Scheduling
+
+Precondition: patient `P001` exists with at least one medical history entry containing `date`, `diagnosis`, `treatment`, and `ongoing_plan`.
+
+```text
+Patient: My patient ID is P001 and I have fever.
+Assistant: Notes the current concern, references prior visit and diagnosis information, acknowledges documented treatment and ongoing plan context, and gives triage guidance before booking.
+```
+
+Expected result:
+
+- reply references past visit context, such as a prior visit date and diagnosis
+- reply acknowledges documented treatments and ongoing plans for scheduling context
+- reply does not expose raw unique treatment strings
+- no appointment is created from the symptom message alone
+
+## Conversation 20: Preferred Or Current Doctor Preserves Continuity
+
+Precondition: patient `P001` has stored concern `fever`, `preferred_doctor` or `current_doctors` set to `D_PROTOCOL_TEST`, and that doctor has an available day.
+
+```text
+Patient: yes, book an appointment
+Assistant: Confirms the appointment with the continuity doctor and available day.
+```
+
+Expected result:
+
+- appointment is created with doctor `D_PROTOCOL_TEST`
+- appointment reason is the stored concern `fever`
+- patient `current_doctors` still includes `D_PROTOCOL_TEST`
 
 ## Direct API Conversations
 

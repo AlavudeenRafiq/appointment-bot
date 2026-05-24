@@ -18,7 +18,8 @@ def build_prompt(query: str, pinecone_context: str,
             f"name: {patient_info.get('name')}; "
             f"medical history records: {history_count}; "
             f"current concern: {patient_info.get('concern') or 'None'}; "
-            f"preferred doctor: {patient_info.get('preferred_doctor') or 'None'}"
+            f"preferred doctor: {patient_info.get('preferred_doctor') or 'None'}; "
+            f"current doctors: {patient_info.get('current_doctors') or []}"
         )
 
     doctor_context = "No doctor selected."
@@ -31,10 +32,11 @@ def build_prompt(query: str, pinecone_context: str,
 
     appointment_context = "No appointment booked."
     if appointment_record:
+        schedule = appointment_record.get("date") or appointment_record.get("day")
         appointment_context = (
             f"Doctor ID: {appointment_record.get('doctor_id')}; "
-            f"date: {appointment_record.get('date')}; "
-            f"time: {appointment_record.get('time')}"
+            f"schedule: {schedule}; "
+            f"time: {appointment_record.get('time') or 'day-level'}"
         )
 
     return f"""
@@ -52,7 +54,7 @@ Background information (for your reasoning only, do not repeat verbatim):
 Guidelines:
 - Use the background only to inform your answer.
 - Do not dump raw context back to the user.
-- If an appointment was booked, confirm it with doctor name, date, and time.
+- If an appointment was booked, confirm it with doctor name and scheduled day/date.
 - If no appointment was booked, suggest helpful next steps.
 - Always sound supportive and caring, like a human assistant.
 """

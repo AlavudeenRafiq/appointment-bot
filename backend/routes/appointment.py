@@ -1,9 +1,10 @@
 from fastapi import APIRouter
-from pydantic import BaseModel
-from typing import List
 from pymongo import MongoClient
 from bson import ObjectId
 import os
+from datetime import datetime
+
+from backend.schemas import Appointment, DoctorCreate, PatientCreate
 
 # MongoDB connection
 client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
@@ -14,59 +15,101 @@ appointments_collection = db["appointments"]
 
 router = APIRouter()
 
-# ------------------ Schemas ------------------
-class MedicalHistory(BaseModel):
-    date: str
-    diagnosis: str
-    treatment: str
+def day_name_from_date(date_text: str):
+    """Return weekday name for a YYYY-MM-DD date string."""
 
-class Patient(BaseModel):
-    patient_id: str
-    name: str
-    medical_history: List[MedicalHistory]
-    concern: str
-    preferred_doctor: str
+    try:
+        return datetime.strptime(date_text, "%Y-%m-%d").strftime("%A")
+    except (TypeError, ValueError):
+        return None
 
-class Availability(BaseModel):
-    date: str
-    time: str
+def normalize_day_text(value: str):
+    """Normalize a day or day-group label for comparison."""
 
-class Doctor(BaseModel):
-    doctor_id: str
-    name: str
-    specialization: str
-    availability: List[Availability]
+    if not value:
+        return None
+    return " ".join(str(value).strip().lower().split())
 
-class Appointment(BaseModel):
-    patient_id: str
-    doctor_id: str
-    date: str
-    time: str
+def availability_matches_request(slot: dict, date: str = None,
+                                 time: str = None, day: str = None) -> bool:
+    """Check whether a doctor availability slot matches a requested day/date."""
+
+    if slot.get("date") and slot.get("time"):
+        return slot.get("date") == date and slot.get("time") == time
+
+    requested_day = day or day_name_from_date(date)
+    requested_day = normalize_day_text(requested_day)
+    if not requested_day:
+        return False
+
+    slot_days = [normalize_day_text(slot_day) for slot_day in slot.get("days") or []]
+    slot_label = normalize_day_text(slot.get("label"))
+    return requested_day in slot_days or requested_day == slot_label
+
+def appointment_conflict_filter(appointment: Appointment) -> dict:
+    """Build the MongoDB filter used to prevent duplicate bookings."""
+
+    conflict_filter = {"doctor_id": appointment.doctor_id}
+    if appointment.date:
+        conflict_filter["date"] = appointment.date
+    elif appointment.day:
+        conflict_filter["day"] = appointment.day
+    if appointment.time:
+        conflict_filter["time"] = appointment.time
+    return conflict_filter
 
 # ------------------ Routes ------------------
 @router.post("/patients")
-def add_patient(patient: Patient):
-    patients_collection.insert_one(patient.dict())
+def add_patient(patient: PatientCreate):
+    """Create a patient record.
+
+    Example payload:
+        {"patient_id": "P001", "name": "John Doe", "medical_history": [],
+         "concern": "fever", "preferred_doctor": "D001"}
+    """
+
+    patients_collection.insert_one(patient.model_dump())
     return {"message": "Patient added successfully"}
 
 @router.get("/patients/{patient_id}")
 def fetch_patient(patient_id: str):
+    """Return one patient record by patient ID."""
+
     patient = patients_collection.find_one({"patient_id": patient_id}, {"_id": 0})
     return patient if patient else {"error": "Patient not found"}
 
 @router.post("/doctors")
-def add_doctor(doctor: Doctor):
-    doctors_collection.insert_one(doctor.dict())
+def add_doctor(doctor: DoctorCreate):
+    """Create a doctor record with day-level availability.
+
+    Example payload:
+        {"doctor_id": "D001", "name": "Dr. Smith",
+         "specialization": "General Physician",
+         "availability": [{"label": "Monday to Friday",
+                           "days": ["Monday", "Tuesday", "Wednesday",
+                                    "Thursday", "Friday"]}]}
+    """
+
+    doctors_collection.insert_one(doctor.model_dump())
     return {"message": "Doctor added successfully"}
 
 @router.get("/doctors/{doctor_id}")
 def fetch_doctor(doctor_id: str):
+    """Return one doctor record by doctor ID."""
+
     doctor = doctors_collection.find_one({"doctor_id": doctor_id}, {"_id": 0})
     return doctor if doctor else {"error": "Doctor not found"}
 
 # ------------------ Appointment Booking ------------------
 @router.post("/appointments")
 def book_appointment(appointment: Appointment):
+    """Book an appointment and remember the doctor for continuity of care.
+
+    Example payload:
+        {"patient_id": "P001", "doctor_id": "D001",
+         "day": "Wednesday", "reason": "fever"}
+    """
+
     # Check patient exists
     patient = patients_collection.find_one({"patient_id": appointment.patient_id})
     if not patient:
@@ -79,26 +122,33 @@ def book_appointment(appointment: Appointment):
 
     # Check doctor availability
     available = any(
-        slot["date"] == appointment.date and slot["time"] == appointment.time
+        availability_matches_request(
+            slot,
+            date=appointment.date,
+            time=appointment.time,
+            day=appointment.day
+        )
         for slot in doctor["availability"]
     )
     if not available:
-        return {"error": "Doctor not available at this time"}
+        return {"error": "Doctor not available on this day or time"}
 
-    existing = appointments_collection.find_one({
-        "doctor_id": appointment.doctor_id,
-        "date": appointment.date,
-        "time": appointment.time
-    })
+    existing = appointments_collection.find_one(appointment_conflict_filter(appointment))
     if existing:
-        return {"error": "Doctor already booked at this time"}
+        return {"error": "Doctor already booked for this day or time"}
 
     # Save appointment
-    appointments_collection.insert_one(appointment.dict())
+    appointments_collection.insert_one(appointment.model_dump())
+    patients_collection.update_one(
+        {"patient_id": appointment.patient_id},
+        {"$addToSet": {"current_doctors": appointment.doctor_id}}
+    )
     return {"message": "Appointment booked successfully"}
 
 @router.get("/appointments/{patient_id}")
 def list_patient_appointments(patient_id: str):
+    """Return all appointments for one patient."""
+
     appointments = list(
         appointments_collection.find({"patient_id": patient_id}, {"_id": 0})
     )
@@ -108,6 +158,8 @@ def list_patient_appointments(patient_id: str):
 
 @router.get("/appointments/doctor/{doctor_id}")
 def list_doctor_appointments(doctor_id: str):
+    """Return all appointments for one doctor."""
+
     appointments = list(
         appointments_collection.find({"doctor_id": doctor_id}, {"_id": 0})
     )
@@ -115,10 +167,10 @@ def list_doctor_appointments(doctor_id: str):
         return {"message": "No appointments found for this doctor"}
     return {"appointments": appointments}
 
-from bson import ObjectId
-
 @router.delete("/appointments/{appointment_id}")
 def cancel_appointment(appointment_id: str):
+    """Cancel an appointment by MongoDB ObjectId."""
+
     # Try to delete appointment by its MongoDB ObjectId
     result = appointments_collection.delete_one({"_id": ObjectId(appointment_id)})
     if result.deleted_count == 0:
@@ -128,6 +180,8 @@ def cancel_appointment(appointment_id: str):
 
 @router.put("/appointments/{appointment_id}")
 def reschedule_appointment(appointment_id: str, new_date: str, new_time: str):
+    """Move an appointment to a new available date and time."""
+
     # Find appointment
     appointment = appointments_collection.find_one({"_id": ObjectId(appointment_id)})
     if not appointment:
@@ -139,11 +193,11 @@ def reschedule_appointment(appointment_id: str, new_date: str, new_time: str):
         return {"error": "Doctor not found"}
 
     available = any(
-        slot["date"] == new_date and slot["time"] == new_time
+        availability_matches_request(slot, date=new_date, time=new_time)
         for slot in doctor["availability"]
     )
     if not available:
-        return {"error": "Doctor not available at this new time"}
+        return {"error": "Doctor not available on this new day or time"}
 
     # Prevent double booking
     existing = appointments_collection.find_one({
